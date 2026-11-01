@@ -50,7 +50,7 @@ jobs:
       - name: Check out pinned host JSON headers for portable codec validation
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          repository: scholay/xsime
+          repository: scholay-xsime/xsime
           ref: cbd5f9db51a77419ecd7882eda6f18dbb309bb0c
           path: .ci-host
           sparse-checkout: platforms/windows/native/third_party/nlohmann

@@ -36,7 +36,7 @@ jobs:
       - name: Check out compatible host
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          repository: scholay/xsime
+          repository: scholay-xsime/xsime
           # Keep each native integration pinned to a compatible host.
           ref: 4b84448c68cd115e0b9b2a2dbc045985fdf9a454
           path: host

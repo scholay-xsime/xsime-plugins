@@ -1,17 +1,21 @@
-# RIMES 官方插件
+# XSIME 官方插件
 
-[![CI](https://github.com/scholay/rimes-plugins/actions/workflows/ci.yml/badge.svg)](https://github.com/scholay/rimes-plugins/actions/workflows/ci.yml)
+[![CI](https://github.com/scholay-xsime/xsime-plugins/actions/workflows/ci.yml/badge.svg)](https://github.com/scholay-xsime/xsime-plugins/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-64748b)](LICENSE)
 
-RIMES 官方免费开源插件仓库。
+XSIME 官方免费开源插件仓库。
 
-核心维护者：[学术海](https://pm.scholay.com) · 本体项目：[XSIME](https://github.com/scholay/xsime)
+本仓库由 `scholay/rimes-plugins` 转移至 `scholay-xsime/xsime-plugins`，保留提交、Issue、Release 和 Stars。
+已发布宿主严格校验旧插件下载路径，因此目录中的 `scholay/rimes-plugins/releases/download/` 继续作为兼容入口，由 GitHub 重定向。
+不要重新创建旧同名仓库，也不要为迁移改写已发布的插件包或摘要。源码和 CI 使用新仓库地址。
+
+核心维护者：[学术海](https://pm.scholay.com) · 本体项目：[XSIME](https://github.com/scholay-xsime/xsime)
 
 RIMES 的中文输入能力基于 [Rime 输入法引擎（librime）](https://github.com/rime/librime)。插件与引擎的实际依赖关系，以各插件说明为准。
 
 ## 当前状态
 
-当前发布目标为 1.1.6，与 XSIME 本体一同收敛原生适配和插件内容。正式包、版本目录及校验值以 [Releases](https://github.com/scholay/rimes-plugins/releases) 为准；CI 候选产物通过检查后再公开发布，已发布的版本文件保持不变。
+当前发布目标为 1.1.6，与 XSIME 本体一同收敛原生适配和插件内容。正式包、版本目录及校验值以 [Releases](https://github.com/scholay-xsime/xsime-plugins/releases) 为准；CI 候选产物通过检查后再公开发布，已发布的版本文件保持不变。
 
 原生适配在本体构建时固定版本导入，随宿主签名；运行时下载包提供宿主解释的处理内容。完整约定见 [插件协议](SPECIFICATION.md)。
 

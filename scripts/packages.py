@@ -157,6 +157,8 @@ def build(root: Path, output: Path, release_version: str) -> dict:
         (output / asset).write_bytes(data)
         digest = hashlib.sha256(data).hexdigest()
         artifacts[asset] = digest
+        # Existing hosts validate this legacy download path. GitHub redirects
+        # it to scholay-xsime/xsime-plugins; do not strand installed hosts.
         entries.append({**package, "sha256": digest, "downloadAssetName": asset,
                         "downloadURL": f"https://github.com/scholay/rimes-plugins/releases/download/v{release_version}/{asset}"})
     catalog = {"schemaVersion": 1, "releaseVersion": release_version, "plugins": entries}

@@ -50,7 +50,8 @@ int main() {
     Check(bounded.All().size() == Units::kMaximumUnits, "bounded fan-out");
     reconstructed.clear(); for (const auto& u : bounded.All()) reconstructed += u.source;
     Check(reconstructed == long_input, "large paste is never truncated");
-    Check(!bounded.Synchronize({{"bad", "\xed\xa0\x80"}}, 0) && bounded.All().empty(), "invalid UTF-8 refuses source");
+    const std::vector<SourceBlock> invalid_utf8{{"bad", "\xed\xa0\x80"}};
+    Check(!bounded.Synchronize(invalid_utf8, 0) && bounded.All().empty(), "invalid UTF-8 refuses source");
     Check(!bounded.Synchronize({{"same", "a"}, {"same", "b"}}, 0), "duplicate source identity refused");
     Units delivery;
     delivery.SetSegmenter([](std::string_view text) { return std::vector<std::string>{std::string(text.substr(0, 6)), std::string(text.substr(6))}; });

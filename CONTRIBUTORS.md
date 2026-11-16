@@ -6,6 +6,7 @@
 
 ## AI coding assistants
 
+- Claude (Anthropic) — Claude Code; the lexicon-review extension.
 - [Codex](https://github.com/codex) (OpenAI) — repository initialization, licensing documentation, plugin packaging, migration and CI.
 
 ## Attribution policy
@@ -17,4 +18,5 @@ rewritten solely to add attribution. The maintainer retains release authority.
 
 ```text
 Co-authored-by: Codex <267193182+codex@users.noreply.github.com>
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ```

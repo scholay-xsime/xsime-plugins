@@ -198,6 +198,34 @@
       ]
     },
     {
+      "source": "native/macos/LearnedWordsDeletion.swift",
+      "destination": "Sources/RimeBuffer/LearnedWordsDeletion.swift",
+      "plugins": [
+        "builtin.lexicon-review"
+      ]
+    },
+    {
+      "source": "native/macos/LearnedWordsLedger.swift",
+      "destination": "Sources/RimeBuffer/LearnedWordsLedger.swift",
+      "plugins": [
+        "builtin.lexicon-review"
+      ]
+    },
+    {
+      "source": "native/macos/LearnedWordsReviewWindowController.swift",
+      "destination": "Sources/RimeBuffer/LearnedWordsReviewWindowController.swift",
+      "plugins": [
+        "builtin.lexicon-review"
+      ]
+    },
+    {
+      "source": "native/macos/LexiconReviewPlugin.swift",
+      "destination": "Sources/RimeBuffer/LexiconReviewPlugin.swift",
+      "plugins": [
+        "builtin.lexicon-review"
+      ]
+    },
+    {
       "source": "native/macos/Mailbox/MailboxModules.swift",
       "destination": "Sources/RimeBuffer/Mailbox/MailboxModules.swift",
       "plugins": [

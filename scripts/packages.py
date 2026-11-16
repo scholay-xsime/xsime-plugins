@@ -79,6 +79,7 @@ def validate(manifest: dict) -> None:
         "metrics.v1": ("extension", ["metrics.aggregate"], {"type", "options"}, {"events", "storage"}),
         "typing.practice.v1": ("extension", ["metrics.aggregate"], {"type", "options"}, {"source", "storage"}),
         "input.chord.v1": ("extension", ["input.chord"], {"type", "options"}, {"schema", "keymap"}),
+        "lexicon.review.v1": ("extension", ["lexicon.learning"], {"type", "options"}, {"dictionaries", "storage"}),
     }.get(contribution.get("type"), (None, None, None, None))
     require(kind is not None and manifest.get("kind") == kind, "unsupported plugin kind or interpreter")
     require(manifest.get("capabilities") == capabilities, "unsupported capabilities")

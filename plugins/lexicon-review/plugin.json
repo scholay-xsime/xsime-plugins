@@ -1,0 +1,35 @@
+{
+  "id": "builtin.lexicon-review",
+  "nameZH": "词库学习",
+  "nameEN": "Lexicon learning",
+  "summaryZH": "词库学习官方插件；学习词由 RIMES 宿主的 Rime 用户词典保存，回顾记录只存本机。",
+  "summaryEN": "Lexicon learning official plugin; learned words stay in the RIMES host's Rime user dictionaries and review records stay on this Mac.",
+  "schemaVersion": 2,
+  "version": "1.0.0",
+  "kind": "extension",
+  "sdkVersion": 1,
+  "minimumHostVersion": "1.2.0",
+  "runtime": "host-interpreted",
+  "platforms": {
+    "macos": {
+      "legacyID": "builtin.lexicon-review",
+      "distribution": "bundled"
+    }
+  },
+  "capabilities": [
+    "lexicon.learning"
+  ],
+  "contribution": {
+    "type": "lexicon.review.v1",
+    "options": {
+      "dictionaries": "chinese,wubi86,english",
+      "storage": "local"
+    }
+  },
+  "license": "Apache-2.0",
+  "maintainer": {
+    "name": "学术海",
+    "url": "https://pm.scholay.com"
+  },
+  "notice": "Copyright 2026 scholay. RIMES official plugin. Native imports retain LICENSES/MIT-legacy.txt where applicable."
+}

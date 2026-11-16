@@ -5,6 +5,7 @@ enum BuiltInPluginID {
     static let statistics = "builtin.statistics"
     static let typingSpeed = "builtin.typing-speed"
     static let flyChordLearning = "builtin.fly-chord-learning"
+    static let lexiconReview = "builtin.lexicon-review"
     static let appleTranslation = "builtin.apple-translation"
     static let myPrompt = "builtin.my-prompt"
     static let remarkable = "builtin.remarkable"
@@ -31,6 +32,7 @@ enum BuiltInPlugins {
             StatisticsInternalPlugin(),
             TypingSpeedInternalPlugin(),
             FlyChordLearningInternalPlugin(),
+            LexiconReviewInternalPlugin(),
             AppleTranslationInternalPlugin(),
             StreamInputInternalPlugin(),
             BufferMusicInternalPlugin(),
@@ -514,5 +516,9 @@ enum BuiltInPluginPageFactory {
 
     static func makeFlyChordLearning(subpageID: String) -> NSViewController {
         FlyChordLearningSettingsViewController(subpageID: subpageID)
+    }
+
+    static func makeLexiconReview(subpageID: String) -> NSViewController {
+        LexiconReviewSettingsViewController(subpageID: subpageID)
     }
 }

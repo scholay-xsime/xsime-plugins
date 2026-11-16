@@ -41,7 +41,7 @@ class PackageTests(unittest.TestCase):
 
     def test_platform_inventory_preserves_mobile_plugins(self):
         items = packages.manifests(packages.ROOT)
-        self.assertEqual(len([p for p in items if "macos" in p["platforms"]]), 21)
+        self.assertEqual(len([p for p in items if "macos" in p["platforms"]]), 22)
         self.assertEqual(len([p for p in items if p.get("platforms", {}).get("macos", {}).get("distribution") == "download"]), 8)
         for platform in ("ios", "android"):
             self.assertTrue({"builtin.ask", "builtin.poem", "builtin.art", "builtin.polisher"} <= {p["id"] for p in items if platform in p["platforms"]})

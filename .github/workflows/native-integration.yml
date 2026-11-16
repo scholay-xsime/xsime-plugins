@@ -38,7 +38,7 @@ jobs:
         with:
           repository: scholay-xsime/xsime
           # Keep each native integration pinned to a compatible host.
-          ref: 4c65315d865137c5d2bd3611242f69f76bda9dc1
+          ref: 1883f0a0881e42d69703ac559c44f4041d9e49bc
           path: host
           persist-credentials: false
 

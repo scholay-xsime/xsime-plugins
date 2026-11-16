@@ -1,7 +1,8 @@
 import AppKit
 
 /// Review of learned words, grouped by the day they were learned, with
-/// deletion and undo (steps 1–2 of docs/plans/learned-words-review.md).
+/// deletion and undo and optional 1–5 scoring (steps 1–3 of
+/// docs/plans/learned-words-review.md).
 final class LearnedWordsReviewWindowController: NSObject, NSWindowDelegate,
                                                 NSTableViewDataSource, NSTableViewDelegate {
     static let shared = LearnedWordsReviewWindowController(ledger: .shared)
@@ -16,12 +17,16 @@ final class LearnedWordsReviewWindowController: NSObject, NSWindowDelegate,
         case everything
         case usedOnce
         case longPhrases
+        case unscored
+        case flagged
 
         var title: String {
             switch self {
             case .everything: return "全部"
             case .usedOnce: return "只用过一次"
             case .longPhrases: return "5 字以上"
+            case .unscored: return "未评分"
+            case .flagged: return "评分 4–5"
             }
         }
     }
@@ -39,12 +44,20 @@ final class LearnedWordsReviewWindowController: NSObject, NSWindowDelegate,
         let change: String
         let isNew: Bool
         var isDeleted = false
+        var score: Int?
 
         var key: LearnedWordKey { LearnedWordKey(word: word, code: code) }
     }
 
     private let ledger: LearnedWordsLedger
     private let preferences: LearnedWordsReviewPreferences
+    private let scoringPreferences: LearnedWordsScoringPreferences
+    private let makeScoringBackend: () -> LearnedWordsScoringBackend
+    private let scoringNotifier: LearnedWordsScoringNotifier
+    private var scores: [String: LearnedWordScore] = [:]
+    private(set) var scoringRound: LearnedWordsScoringRound?
+    /// Footer text while a scoring round runs.
+    private var scoringProgress: String?
     private(set) var window: NSWindow?
     private(set) var kind: UserLexiconKind = .chinese
     private(set) var sections: [SectionRow] = []
@@ -70,13 +83,21 @@ final class LearnedWordsReviewWindowController: NSObject, NSWindowDelegate,
     private let wordTable = LearnedWordsTableView()
     private let deleteButton = NSButton(title: "删除所选…", target: nil, action: nil)
     private let undoButton = NSButton(title: "撤销这一轮", target: nil, action: nil)
+    private let scoreButton = NSButton(title: "评分…", target: nil, action: nil)
+    private let deleteFlaggedButton = NSButton(title: "删除评分为 5 的…", target: nil, action: nil)
     private let footerLabel = NSTextField(labelWithString: "")
     private static let defaultFooter = "选中词后按 Delete 键或点“删除所选…”。删除前会自动备份，可以撤销。"
 
     init(ledger: LearnedWordsLedger,
-         preferences: LearnedWordsReviewPreferences = .shared) {
+         preferences: LearnedWordsReviewPreferences = .shared,
+         scoringPreferences: LearnedWordsScoringPreferences = .shared,
+         scoringBackend: @escaping () -> LearnedWordsScoringBackend = { CodexLearnedWordsScoringBackend() },
+         scoringNotifier: LearnedWordsScoringNotifier = MailboxLearnedWordsScoringNotifier()) {
         self.ledger = ledger
         self.preferences = preferences
+        self.scoringPreferences = scoringPreferences
+        self.makeScoringBackend = scoringBackend
+        self.scoringNotifier = scoringNotifier
         super.init()
     }
 
@@ -90,6 +111,13 @@ final class LearnedWordsReviewWindowController: NSObject, NSWindowDelegate,
     }
 
     func select(kind: UserLexiconKind) {
+        // A running round belongs to one dictionary; keep the window on it.
+        if scoringRound != nil, kind != self.kind {
+            if let index = UserLexiconKind.allCases.firstIndex(of: self.kind) {
+                dictionaryPopUp.selectItem(at: index)
+            }
+            return
+        }
         if kind != self.kind { notice = nil }
         self.kind = kind
         if let index = UserLexiconKind.allCases.firstIndex(of: kind) {
@@ -110,6 +138,7 @@ final class LearnedWordsReviewWindowController: NSObject, NSWindowDelegate,
         days = ledger.days(for: kind)
         rounds = ledger.deletionRounds(for: kind)
         deletedKeys = ledger.currentlyDeleted(for: kind)
+        scores = ledger.scores(for: kind)
         let entries = ledger.currentEntries(for: kind)
         var built = days.map { day in
             SectionRow(section: .day(day.day),
@@ -182,6 +211,11 @@ final class LearnedWordsReviewWindowController: NSObject, NSWindowDelegate,
                                change: change, isNew: false, isDeleted: deleted)
             }.sorted(by: Self.byWord)
         }
+        allRows = allRows.map { row in
+            var row = row
+            row.score = scores[row.word]?.score
+            return row
+        }
         applyFilter()
     }
 
@@ -196,15 +230,24 @@ final class LearnedWordsReviewWindowController: NSObject, NSWindowDelegate,
         case .everything: rows = allRows
         case .usedOnce: rows = allRows.filter { $0.count == 1 }
         case .longPhrases: rows = allRows.filter { $0.word.count >= 5 }
+        case .unscored: rows = allRows.filter { $0.score == nil }
+        case .flagged: rows = allRows.filter { ($0.score ?? 0) >= 4 }
         }
         if let descriptor = wordTable.sortDescriptors.first {
             rows = Self.sorted(rows, by: descriptor)
+        } else if rows.contains(where: { $0.score != nil }) {
+            // Default order once scores exist: highest score first; unscored
+            // rows keep their order after them.
+            rows = rows.enumerated().sorted { lhs, rhs in
+                let left = lhs.element.score ?? 0, right = rhs.element.score ?? 0
+                return left != right ? left > right : lhs.offset < rhs.offset
+            }.map(\.element)
         }
         wordTable.reloadData()
         countLabel.stringValue = "\(rows.count.formatted()) 个词"
         emptyLabel.stringValue = emptyMessage()
         emptyLabel.isHidden = !rows.isEmpty
-        footerLabel.stringValue = notice ?? Self.defaultFooter
+        footerLabel.stringValue = scoringProgress ?? notice ?? Self.defaultFooter
         updateActionButtons()
     }
 
@@ -214,9 +257,19 @@ final class LearnedWordsReviewWindowController: NSObject, NSWindowDelegate,
             roundIsOpen = rounds.first(where: { $0.id == id }).map { !$0.isUndone } ?? false
         }
         deleteButton.isHidden = roundIsOpen != nil
-        deleteButton.isEnabled = !deletableSelection().isEmpty
+        deleteButton.isEnabled = !deletableSelection().isEmpty && scoringRound == nil
         undoButton.isHidden = roundIsOpen == nil
-        undoButton.isEnabled = roundIsOpen == true
+        undoButton.isEnabled = roundIsOpen == true && scoringRound == nil
+        scoreButton.isHidden = !scoringPreferences.isEnabled && scoringRound == nil
+        scoreButton.title = scoringRound == nil ? "评分…" : "停止评分"
+        deleteFlaggedButton.isHidden = roundIsOpen != nil || !rows.contains { $0.score != nil }
+        deleteFlaggedButton.isEnabled = !highestScoredKeys().isEmpty && scoringRound == nil
+    }
+
+    /// Visible, not yet deleted rows scored 5.
+    private func highestScoredKeys() -> [LearnedWordKey] {
+        if case .deletion? = selectedSection { return [] }
+        return rows.filter { $0.score == 5 && !$0.isDeleted }.map(\.key)
     }
 
     private func deletableSelection() -> [LearnedWordKey] {
@@ -234,6 +287,8 @@ final class LearnedWordsReviewWindowController: NSObject, NSWindowDelegate,
     }
 
     var canDeleteSelection: Bool { !deleteButton.isHidden && deleteButton.isEnabled }
+    var canDeleteHighestScored: Bool { !deleteFlaggedButton.isHidden && deleteFlaggedButton.isEnabled }
+    var canStartScoring: Bool { scoringPreferences.isEnabled && scoringRound == nil }
     var canUndoSelectedRound: Bool { !undoButton.isHidden && undoButton.isEnabled }
 
     private func emptyMessage() -> String {
@@ -285,6 +340,9 @@ final class LearnedWordsReviewWindowController: NSObject, NSWindowDelegate,
                 result = lhs.count == rhs.count ? .orderedSame
                     : (lhs.count < rhs.count ? .orderedAscending : .orderedDescending)
             case "change": result = lhs.change.localizedStandardCompare(rhs.change)
+            case "score":
+                let left = lhs.score ?? 0, right = rhs.score ?? 0
+                result = left == right ? .orderedSame : (left < right ? .orderedAscending : .orderedDescending)
             default: result = lhs.word.localizedStandardCompare(rhs.word)
             }
             return ascending ? result == .orderedAscending : result == .orderedDescending
@@ -324,15 +382,30 @@ final class LearnedWordsReviewWindowController: NSObject, NSWindowDelegate,
 
     /// Asks first unless `skipConfirmation` is set (the smoke test does).
     func requestDeletion(skipConfirmation: Bool) {
-        let keys = deletableSelection()
-        guard !keys.isEmpty else { return }
+        confirmDeletion(deletableSelection(), skipConfirmation: skipConfirmation,
+                        title: { "删除 \($0.formatted()) 个学习词？" })
+    }
+
+    /// One-click removal of every visible word scored 5 (step 3 of the plan).
+    func requestDeletionOfHighestScored(skipConfirmation: Bool) {
+        confirmDeletion(highestScoredKeys(), skipConfirmation: skipConfirmation,
+                        title: { "删除评分为 5 的 \($0.formatted()) 个学习词？" })
+    }
+
+    @objc private func deleteFlaggedButtonPressed(_ sender: Any?) {
+        requestDeletionOfHighestScored(skipConfirmation: false)
+    }
+
+    private func confirmDeletion(_ keys: [LearnedWordKey], skipConfirmation: Bool,
+                                 title: (Int) -> String) {
+        guard !keys.isEmpty, scoringRound == nil else { return }
         if skipConfirmation {
             performDeletion(keys)
             return
         }
         guard let window else { return }
         let alert = NSAlert()
-        alert.messageText = "删除 \(keys.count.formatted()) 个学习词？"
+        alert.messageText = title(keys.count)
         alert.informativeText = "删除前会自动备份当前学习词库，之后可以在左侧的“删除”记录里撤销。\n以后再输入这些词时，Rime 会按原来的次数把它们恢复。"
         alert.alertStyle = .warning
         alert.addButton(withTitle: "删除").hasDestructiveAction = true
@@ -366,6 +439,85 @@ final class LearnedWordsReviewWindowController: NSObject, NSWindowDelegate,
         reload()
     }
 
+    // MARK: Scoring
+
+    @objc private func scoreButtonPressed(_ sender: Any?) {
+        if scoringRound != nil { stopScoring() } else { startScoring(skipConfirmation: false) }
+    }
+
+    /// Shows how many words will be sent, then sends them in batches. The
+    /// smoke test passes `skipConfirmation`.
+    func startScoring(skipConfirmation: Bool) {
+        guard scoringRound == nil, scoringPreferences.isEnabled else { return }
+        let words = ledger.scoringCandidates(for: kind, preferences: scoringPreferences,
+                                             limit: scoringPreferences.roundLimit)
+        guard !words.isEmpty else {
+            notice = "没有需要评分的词：都已评分，或被排除规则留在本机。"
+            applyFilter()
+            return
+        }
+        let backend = makeScoringBackend()
+        if case let .unavailable(message) = backend.availability {
+            notice = "无法评分：\(message)"
+            applyFilter()
+            return
+        }
+        let model = scoringPreferences.model
+        let batchSize = scoringPreferences.batchSize
+        let begin = { [weak self] in
+            self?.runScoring(words: words, model: model, batchSize: batchSize, backend: backend)
+        }
+        if skipConfirmation { begin(); return }
+        guard let window else { return }
+        let batches = (words.count + batchSize - 1) / batchSize
+        let alert = NSAlert()
+        alert.messageText = "把 \(words.count.formatted()) 个学习词发送给 ChatGPT 评分？"
+        alert.informativeText = """
+            这些词会经本机的 Codex CLI 发送给 OpenAI（模型 \(model)），分 \(batches) 批，每批都有固定的处理开销。\
+            只发送词本身，不发送编码、次数或日期；含数字、英文或过长的词按设置留在本机。
+            评分只影响排序和一键删除的范围，不会自动删除任何词。完成后会在 Mailbox 里提示。
+            """
+        alert.addButton(withTitle: "发送并评分")
+        alert.addButton(withTitle: "取消")
+        alert.beginSheetModal(for: window) { response in
+            if response == .alertFirstButtonReturn { begin() }
+        }
+    }
+
+    func stopScoring() {
+        scoringRound?.cancel()
+    }
+
+    private func runScoring(words: [String], model: String, batchSize: Int,
+                            backend: LearnedWordsScoringBackend) {
+        guard scoringRound == nil else { return }
+        let round = LearnedWordsScoringRound(ledger: ledger, kind: kind, words: words,
+                                             model: model, batchSize: batchSize, backend: backend)
+        scoringRound = round
+        notice = nil
+        round.start(progress: { [weak self] done, total in
+            guard let self, self.scoringRound === round else { return }
+            self.scoringProgress = "正在评分 \(words.count.formatted()) 个词：第 \(min(done + 1, total))/\(total) 批…"
+            self.reload()
+        }, completion: { [weak self] outcome in
+            guard let self, self.scoringRound === round else { return }
+            self.scoringRound = nil
+            self.scoringProgress = nil
+            switch outcome {
+            case let .finished(scored, unscored):
+                self.notice = "本轮已评分 \(scored.formatted()) 个词"
+                    + (unscored > 0 ? "，\(unscored.formatted()) 个没有拿到有效评分。" : "。")
+                self.scoringNotifier.scoringRoundFinished(kind: round.kind, scored: scored,
+                                                          unscored: unscored, model: round.model)
+            case let .cancelled(scored):
+                self.notice = "已停止评分；已保存 \(scored.formatted()) 个词的评分。"
+            case let .failed(scored, message):
+                self.notice = "评分中断：\(message)。已保存 \(scored.formatted()) 个词的评分，可以稍后再试。"
+            }
+            self.reload()
+        })
+    }
+
     private func presentError(_ error: Error, title: String = "无法记录学习词") {
         guard let window else { return }
         let alert = NSAlert()
@@ -394,11 +546,13 @@ final class LearnedWordsReviewWindowController: NSObject, NSWindowDelegate,
             case "code": cell.textField?.stringValue = item.code
             case "count": cell.textField?.stringValue = "\(item.count)"
             case "change": cell.textField?.stringValue = item.change
+            case "score": cell.textField?.stringValue = item.score.map(String.init) ?? "—"
             default: cell.textField?.stringValue = item.word
             }
             cell.textField?.textColor = item.isDeleted ? RimeUI.textMuted
                 : (identifier.rawValue == "change" && item.isNew ? RimeUI.accentTextColor
-                                                                 : RimeUI.textPrimary)
+                   : (identifier.rawValue == "score" && (item.score ?? 0) >= 4
+                      ? RimeUI.warningTextColor : RimeUI.textPrimary))
         }
         return cell
     }
@@ -497,8 +651,9 @@ final class LearnedWordsReviewWindowController: NSObject, NSWindowDelegate,
         configure(sectionTable, columns: [("section", "日期", 200)], sortable: false)
         sectionTable.headerView = nil
         sectionTable.identifier = NSUserInterfaceItemIdentifier("lexicon-review.sections")
-        configure(wordTable, columns: [("word", "词", 220), ("code", "编码", 220),
-                                       ("count", "次数", 70), ("change", "变化", 110)],
+        configure(wordTable, columns: [("word", "词", 200), ("code", "编码", 190),
+                                       ("count", "次数", 60), ("score", "评分", 56),
+                                       ("change", "变化", 100)],
                   sortable: true)
         wordTable.identifier = NSUserInterfaceItemIdentifier("lexicon-review.words")
 
@@ -515,7 +670,10 @@ final class LearnedWordsReviewWindowController: NSObject, NSWindowDelegate,
         countLabel.font = .systemFont(ofSize: 11)
         countLabel.textColor = RimeUI.textMuted
         for (button, action, id) in [(deleteButton, #selector(deleteButtonPressed(_:)), "delete"),
-                                     (undoButton, #selector(undoSelectedRound(_:)), "undo")] {
+                                     (undoButton, #selector(undoSelectedRound(_:)), "undo"),
+                                     (scoreButton, #selector(scoreButtonPressed(_:)), "score"),
+                                     (deleteFlaggedButton, #selector(deleteFlaggedButtonPressed(_:)),
+                                      "delete-flagged")] {
             button.target = self
             button.action = action
             button.controlSize = .small
@@ -524,7 +682,9 @@ final class LearnedWordsReviewWindowController: NSObject, NSWindowDelegate,
         }
         undoButton.isHidden = true
         wordTable.onDelete = { [weak self] in self?.requestDeletion(skipConfirmation: false) }
-        let toolbar = NSStackView(views: [filterControl, NSView(), countLabel, deleteButton, undoButton])
+        scoreButton.toolTip = "把未评分的学习词发送给 ChatGPT，按 1–5 分标出疑似误学的词"
+        let toolbar = NSStackView(views: [filterControl, NSView(), countLabel, scoreButton,
+                                          deleteFlaggedButton, deleteButton, undoButton])
         toolbar.orientation = .horizontal
         toolbar.alignment = .centerY
         toolbar.views[1].setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -581,6 +741,9 @@ final class LearnedWordsReviewWindowController: NSObject, NSWindowDelegate,
         win.center()
         window = win
 
+        observers.append(NotificationCenter.default.addObserver(
+            forName: LearnedWordsScoringPreferences.didChange, object: nil, queue: .main
+        ) { [weak self] _ in self?.updateActionButtons() })
         observers.append(NotificationCenter.default.addObserver(
             forName: .rimeAppearanceDidChange, object: nil, queue: .main
         ) { [weak self] _ in

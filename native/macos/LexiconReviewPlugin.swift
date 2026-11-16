@@ -38,6 +38,7 @@ final class LexiconReviewExtension: LexiconLearningProvider {
     func stop() {
         ledger.stopDailyCapture()
         if reviewWindowOpened {
+            LearnedWordsReviewWindowController.shared.stopScoring()
             LearnedWordsReviewWindowController.shared.window?.close()
         }
     }
@@ -64,8 +65,8 @@ final class LexiconReviewInternalPlugin: InternalPlugin {
         wireID: nil,
         name: "词库学习",
         symbolName: "book.closed",
-        version: "1.0.0",
-        summary: "管理各词库的本机学习数据：回顾每天学到的词、删除误学词并可撤销，导入与导出学习记录。",
+        version: "1.1.0",
+        summary: "管理各词库的本机学习数据：回顾每天学到的词、可选地用 ChatGPT 评分初筛、删除误学词并可撤销，导入与导出学习记录。",
         source: .builtIn,
         capabilities: [.settingsPage, .lexiconLearning, .localStorage],
         settings: PluginSettingsContribution(
@@ -115,10 +116,13 @@ final class LexiconReviewSettingsViewController: NSViewController {
     ]
 
     private let learning: LexiconReviewExtension
+    private let scoring: LearnedWordsScoringPreferences
     private let column = NSStackView()
 
-    init(subpageID: String, learning: LexiconReviewExtension = .shared) {
+    init(subpageID: String, learning: LexiconReviewExtension = .shared,
+         scoring: LearnedWordsScoringPreferences = .shared) {
         self.learning = learning
+        self.scoring = scoring
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -154,6 +158,120 @@ final class LexiconReviewSettingsViewController: NSViewController {
                                            title: lexicon.title,
                                            detail: lexicon.detail))
         }
+        scoringSection().forEach(column.addArrangedSubview)
+    }
+
+    // MARK: Scoring (step 3 of docs/plans/learned-words-review.md)
+
+    private func scoringSection() -> [NSView] {
+        let title = NSTextField(labelWithString: "评分初筛（可选）")
+        title.font = .systemFont(ofSize: 11, weight: .semibold)
+        title.textColor = RimeUI.textPrimary
+
+        let enable = NSButton(checkboxWithTitle: "允许把学习词发送给 ChatGPT 评分",
+                              target: self, action: #selector(scoringEnabledChanged(_:)))
+        enable.state = scoring.isEnabled ? .on : .off
+        enable.identifier = NSUserInterfaceItemIdentifier("lexicon-review.scoring.enabled")
+
+        let privacy = NSTextField(wrappingLabelWithString:
+            "默认关闭。开启后，回顾窗口会出现“评分…”：每一轮都由你手动发起，发起前显示将发送的词数；"
+            + "词语经本机 Codex CLI 和你的 ChatGPT 登录发送给 OpenAI，只发送词本身。"
+            + "模型按 1–5 分标出疑似误学的词（5 最可疑），只影响排序和“删除评分为 5 的…”的范围，不会自动删除。完成后在 Mailbox 提示。")
+        privacy.font = .systemFont(ofSize: 10)
+        privacy.textColor = RimeUI.textMuted
+        privacy.preferredMaxLayoutWidth = 650
+
+        let model = popUp(LearnedWordsScoringPreferences.modelChoices.map(\.title),
+                          selected: LearnedWordsScoringPreferences.modelChoices
+                            .firstIndex { $0.value == scoring.model } ?? 0,
+                          action: #selector(modelChanged(_:)))
+        let batch = popUp(LearnedWordsScoringPreferences.batchSizeChoices.map { "每批 \($0) 个" },
+                          selected: LearnedWordsScoringPreferences.batchSizeChoices
+                            .firstIndex(of: scoring.batchSize) ?? 0,
+                          action: #selector(batchSizeChanged(_:)))
+        let limit = popUp(LearnedWordsScoringPreferences.roundLimitChoices.map { "每轮最多 \($0) 个" },
+                          selected: LearnedWordsScoringPreferences.roundLimitChoices
+                            .firstIndex(of: scoring.roundLimit) ?? 0,
+                          action: #selector(roundLimitChanged(_:)))
+        let options = NSStackView(views: [label("模型"), model, batch, limit])
+        options.orientation = .horizontal
+        options.alignment = .centerY
+        options.spacing = 8
+
+        let digits = NSButton(checkboxWithTitle: "含数字的词留在本机", target: self,
+                              action: #selector(excludeDigitsChanged(_:)))
+        digits.state = scoring.excludesDigits ? .on : .off
+        let latin = NSButton(checkboxWithTitle: "含英文字母的词留在本机", target: self,
+                             action: #selector(excludeLatinChanged(_:)))
+        latin.state = scoring.excludesLatin ? .on : .off
+        let long = NSButton(checkboxWithTitle:
+                                "超过 \(LearnedWordsScoringPreferences.longWordLength) 个字的词留在本机",
+                            target: self, action: #selector(excludeLongChanged(_:)))
+        long.state = scoring.excludesLongWords ? .on : .off
+        let exclusions = NSStackView(views: [digits, latin, long])
+        exclusions.orientation = .horizontal
+        exclusions.alignment = .centerY
+        exclusions.spacing = 14
+
+        for control in [model, batch, limit, digits, latin, long] as [NSControl] {
+            control.isEnabled = scoring.isEnabled
+            control.controlSize = .small
+        }
+        let spacer = NSView()
+        spacer.translatesAutoresizingMaskIntoConstraints = false
+        spacer.heightAnchor.constraint(equalToConstant: 8).isActive = true
+        return [spacer, title, enable, privacy, options, exclusions]
+    }
+
+    private func label(_ text: String) -> NSTextField {
+        let field = NSTextField(labelWithString: text)
+        field.font = .systemFont(ofSize: 11)
+        field.textColor = RimeUI.textSecondary
+        return field
+    }
+
+    private func popUp(_ titles: [String], selected: Int, action: Selector) -> NSPopUpButton {
+        let button = NSPopUpButton()
+        button.addItems(withTitles: titles)
+        button.selectItem(at: selected)
+        button.target = self
+        button.action = action
+        return button
+    }
+
+    @objc private func scoringEnabledChanged(_ sender: NSButton) {
+        scoring.setEnabled(sender.state == .on)
+        rebuild()
+    }
+
+    @objc private func modelChanged(_ sender: NSPopUpButton) {
+        let choices = LearnedWordsScoringPreferences.modelChoices
+        guard choices.indices.contains(sender.indexOfSelectedItem) else { return }
+        scoring.setModel(choices[sender.indexOfSelectedItem].value)
+    }
+
+    @objc private func batchSizeChanged(_ sender: NSPopUpButton) {
+        let choices = LearnedWordsScoringPreferences.batchSizeChoices
+        guard choices.indices.contains(sender.indexOfSelectedItem) else { return }
+        scoring.setBatchSize(choices[sender.indexOfSelectedItem])
+    }
+
+    @objc private func roundLimitChanged(_ sender: NSPopUpButton) {
+        let choices = LearnedWordsScoringPreferences.roundLimitChoices
+        guard choices.indices.contains(sender.indexOfSelectedItem) else { return }
+        scoring.setRoundLimit(choices[sender.indexOfSelectedItem])
+    }
+
+    @objc private func excludeDigitsChanged(_ sender: NSButton) {
+        scoring.setExcludesDigits(sender.state == .on)
+    }
+
+    @objc private func excludeLatinChanged(_ sender: NSButton) {
+        scoring.setExcludesLatin(sender.state == .on)
+    }
+
+    @objc private func excludeLongChanged(_ sender: NSButton) {
+        scoring.setExcludesLongWords(sender.state == .on)
     }
 
     private func actionButton(_ title: String, kind: UserLexiconKind,

@@ -21,6 +21,8 @@ final class TypingTestTrackTextView: TypingTestTextView, NSTextStorageDelegate {
     private let glyphShift = (TypingTestTrackTextView.cellWidth - TypingTestTrackTextView.fontSize) / 2
     private var lineHeight: CGFloat = 28
     private var advanceCache: [String: CGFloat] = [:]
+    private var correctingKerning = false       // our own kern edits must not re-enter the storage delegate
+    private var kernDirtyFrom: Int?             // first UTF-16 offset whose neighbours changed
     private(set) var columns = 20
 
     private(set) var sourceCharacters: [Character] = []
@@ -132,8 +134,16 @@ final class TypingTestTrackTextView: TypingTestTextView, NSTextStorageDelegate {
         return nil
     }
 
+    /// Committed characters only: composition (marked text) never moves the cursor cell or the rows.
     private var typedCount: Int {
-        (string as NSString).length == 0 ? 0 : TypingTestSession.normalized(string).count
+        let native = string as NSString
+        guard native.length > 0 else { return 0 }
+        var text = native as String
+        let marked = markedRange()
+        if hasMarkedText(), marked.location != NSNotFound, NSMaxRange(marked) <= native.length {
+            text = native.replacingCharacters(in: marked, with: "")
+        }
+        return TypingTestSession.normalized(text).count
     }
 
     // MARK: Geometry
@@ -182,34 +192,82 @@ final class TypingTestTrackTextView: TypingTestTextView, NSTextStorageDelegate {
         return [.font: trackFont, .paragraphStyle: style, .foregroundColor: RimeUI.textPrimary]
     }
 
-    /// Advance of a character as the layout manager will really set it. Measured
-    /// between two ideographs, because CJK punctuation is full-width in context
-    /// but reports a narrow width when measured alone.
-    private func advance(of piece: String) -> CGFloat {
-        if let cached = advanceCache[piece] { return cached }
+    /// Distance from the start of `piece` to the start of whatever follows it, as
+    /// the text system sets it. Measured against the next character because the
+    /// system adds Chinese-Latin spacing, squeezes adjacent CJK punctuation and
+    /// kerns pairs; a lone measurement misses all three and the rows drift.
+    private func advance(of piece: String, before next: String?) -> CGFloat {
+        let key = piece + "\u{0}" + (next ?? "")
+        if let cached = advanceCache[key] { return cached }
         func width(_ text: String) -> CGFloat { NSAttributedString(string: text, attributes: [.font: trackFont]).size().width }
-        let width3 = width("天" + piece + "天"), width2 = width("天天")
-        let value = max(1, width3 - width2)
-        advanceCache[piece] = value
+        let value = max(1, next.map { width(piece + $0) - width($0) } ?? width(piece))
+        advanceCache[key] = value
         return value
     }
 
-    /// Pads every character (typed text and marked text alike) to one cell.
+    /// Pads every character (typed text and marked text alike) to one cell. The
+    /// neighbours of an edit are re-padded too, since their advance depends on it.
     func textStorage(_ textStorage: NSTextStorage, willProcessEditing editedMask: NSTextStorageEditActions,
                      range editedRange: NSRange, changeInLength delta: Int) {
-        guard editedMask.contains(.editedCharacters) || editedMask.contains(.editedAttributes),
+        guard !correctingKerning, editedMask.contains(.editedCharacters) || editedMask.contains(.editedAttributes),
               textStorage.length > 0 else { return }
         let whole = NSRange(location: 0, length: textStorage.length)
         let base = trackAttributes()
         textStorage.addAttribute(.paragraphStyle, value: base[.paragraphStyle]!, range: whole)
-        guard editedRange.length > 0, NSMaxRange(editedRange) <= textStorage.length else { return }
-        textStorage.addAttribute(.font, value: trackFont, range: editedRange)
-        (textStorage.string as NSString).enumerateSubstrings(
-            in: editedRange, options: [.byComposedCharacterSequences, .substringNotRequired]
-        ) { _, range, _, _ in
-            let piece = (textStorage.string as NSString).substring(with: range)
+        guard NSMaxRange(editedRange) <= textStorage.length else { return }
+        let native = textStorage.string as NSString
+        if editedRange.length > 0 { textStorage.addAttribute(.font, value: trackFont, range: editedRange) }
+        let lower = editedRange.location > 0 ? native.rangeOfComposedCharacterSequence(at: editedRange.location - 1).location : 0
+        let upper = min(native.length, NSMaxRange(editedRange) + 1)
+        let span = NSRange(location: lower, length: NSMaxRange(native.rangeOfComposedCharacterSequence(at: upper - 1)) - lower)
+        kernDirtyFrom = min(kernDirtyFrom ?? lower, lower)
+        native.enumerateSubstrings(in: span, options: [.byComposedCharacterSequences, .substringNotRequired]) { _, range, _, _ in
+            let piece = native.substring(with: range)
             if piece == "\n" { textStorage.removeAttribute(.kern, range: range); return }
-            textStorage.addAttribute(.kern, value: max(0, Self.cellWidth - self.advance(of: piece)), range: range)
+            var next: String?
+            if NSMaxRange(range) < native.length {
+                let following = native.substring(with: native.rangeOfComposedCharacterSequence(at: NSMaxRange(range)))
+                if following != "\n" { next = following }
+            }
+            textStorage.addAttribute(.kern, value: max(0, Self.cellWidth - self.advance(of: piece, before: next)), range: range)
+        }
+    }
+
+    /// Closed-loop correction: lay the typed text out, read where every character
+    /// really starts, and adjust its pad until the next one starts exactly one
+    /// cell later. Estimates from measuring strings cannot capture every
+    /// context-dependent adjustment, the layout itself can.
+    private func correctKerning() {
+        guard let storage = textStorage, let layout = layoutManager, let container = textContainer,
+              let dirty = kernDirtyFrom else { return }
+        kernDirtyFrom = nil
+        let native = storage.string as NSString
+        guard native.length > 1 else { return }
+        correctingKerning = true
+        defer { correctingKerning = false }
+        let start = native.rangeOfComposedCharacterSequence(at: min(dirty, native.length - 1)).location
+        for _ in 0..<4 {
+            layout.ensureLayout(for: container)
+            var previous: (range: NSRange, x: CGFloat, y: CGFloat)?
+            var fixes: [(NSRange, CGFloat)] = []
+            native.enumerateSubstrings(in: NSRange(location: start, length: native.length - start),
+                                       options: [.byComposedCharacterSequences, .substringNotRequired]) { _, range, _, _ in
+                let glyph = layout.glyphIndexForCharacter(at: range.location)
+                guard layout.isValidGlyphIndex(glyph) else { previous = nil; return }
+                let line = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+                let current = (range: range, x: line.minX + layout.location(forGlyphAt: glyph).x, y: line.minY)
+                defer { previous = current }
+                guard let before = previous, abs(before.y - current.y) < 1 else { return }
+                if native.substring(with: before.range) == "\n" { return }
+                let error = Self.cellWidth - (current.x - before.x)
+                guard abs(error) > 0.2 else { return }
+                let kern = (storage.attribute(.kern, at: before.range.location, effectiveRange: nil) as? CGFloat) ?? 0
+                fixes.append((before.range, max(0, kern + error)))
+            }
+            guard !fixes.isEmpty else { break }
+            storage.beginEditing()
+            for (range, kern) in fixes { storage.addAttribute(.kern, value: kern, range: range) }
+            storage.endEditing()
         }
     }
 
@@ -342,6 +400,38 @@ final class TypingTestTrackTextView: TypingTestTextView, NSTextStorageDelegate {
         }
     }
 
+    // MARK: Composition
+
+    /// Marked text changes do not always pass through didChangeText; keep the
+    /// composition placeholder padded to its cell as well.
+    override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+        correctKerning()
+    }
+
+    /// The input method anchors its candidate panel here. While composing, that is
+    /// the grid cell the next character will land in, taken from the same row model
+    /// the tracks are drawn from. The text system would report the end of the
+    /// previous row (zero width) whenever a full row makes the composition wrap,
+    /// so the panel jumped right and back at every row end.
+    override func firstRect(forCharacterRange range: NSRange, actualRange: NSRangePointer?) -> NSRect {
+        guard hasMarkedText(), let window, let cell = cursorCell() else {
+            return super.firstRect(forCharacterRange: range, actualRange: actualRange)
+        }
+        actualRange?.pointee = markedRange()
+        return window.convertToScreen(convert(cell, to: nil))
+    }
+
+    /// The cell the next committed character goes into, in view coordinates; nil past the source.
+    private func cursorCell() -> NSRect? {
+        let layout = layoutRows(total: max(sourceCharacters.count, typedCount))
+        let typed = typedCount
+        guard let row = rowIndex(of: typed, in: layout) else { return nil }
+        let column = layout[row].firstColumn + (typed - layout[row].start)
+        return NSRect(x: textContainerInset.width - glyphShift + CGFloat(column) * Self.cellWidth, y: typedRowTop(row),
+                      width: Self.cellWidth, height: lineHeight)
+    }
+
     // MARK: Behaviour
 
     /// A typed line break would desynchronise the rows from the source.
@@ -351,6 +441,7 @@ final class TypingTestTrackTextView: TypingTestTextView, NSTextStorageDelegate {
     override func didChangeText() {
         super.didChangeText()
         syncParagraphBreaks()
+        correctKerning()
         invalidateIntrinsicContentSize()
         needsDisplay = true
         scrollCaretIntoView()
@@ -388,6 +479,25 @@ final class TypingTestTrackTextView: TypingTestTextView, NSTextStorageDelegate {
         layoutRows(total: max(sourceCharacters.count, typedCount)).map { ($0.start, $0.end, $0.firstColumn) }
     }
     var smokeIndentCells: Int { indentCells }
+    /// The cell the next character goes into, in view coordinates.
+    var smokeCursorCell: NSRect? { cursorCell() }
+    /// Worst distance, in cells, between where a typed character sits and the cell it belongs to.
+    var smokeWorstCellDrift: CGFloat {
+        guard let layout = layoutManager, let container = textContainer else { return 0 }
+        layout.ensureLayout(for: container)
+        let native = string as NSString
+        var worst: CGFloat = 0, column = 0, lineY: CGFloat?, base: CGFloat = 0
+        native.enumerateSubstrings(in: NSRange(location: 0, length: native.length), options: .byComposedCharacterSequences) { piece, range, _, _ in
+            guard piece != "\n" else { lineY = nil; return }
+            let glyph = layout.glyphIndexForCharacter(at: range.location)
+            let line = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+            let x = line.minX + layout.location(forGlyphAt: glyph).x
+            if lineY != line.minY { lineY = line.minY; base = x; column = 0 }
+            worst = max(worst, abs((x - base) / Self.cellWidth - CGFloat(column)))
+            column += 1
+        }
+        return worst
+    }
     /// Top of the source row the next character belongs to, in view coordinates.
     var smokeCaretRowTop: CGFloat {
         let layout = layoutRows(total: max(sourceCharacters.count, typedCount))

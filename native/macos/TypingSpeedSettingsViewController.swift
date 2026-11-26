@@ -269,6 +269,10 @@ final class TypingSpeedSettingsViewController: NSViewController, TypingPracticeT
         statusLabel.setContentHuggingPriority(.init(600), for: .horizontal)
         timeLabel.font = .monospacedDigitSystemFont(ofSize: 15, weight: .medium)
         progressLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        // Room for "100%" from the start, so the bar does not shift as the percentage gains a digit.
+        progressLabel.alignment = .right
+        progressLabel.widthAnchor.constraint(greaterThanOrEqualToConstant:
+            ceil(NSAttributedString(string: "100%", attributes: [.font: progressLabel.font!]).size().width) + 2).isActive = true
         progress.isIndeterminate = false
         progress.minValue = 0
         progress.maxValue = 1
@@ -497,6 +501,13 @@ final class TypingSpeedSettingsViewController: NSViewController, TypingPracticeT
     }
 
     @objc private func startTapped() {
+        // Practice is XSIME-only: its composition is shown in the candidate panel, not in the cells.
+        if contextProvider == nil,
+           !(RimeInputSourceAuthority.currentInputSourceID().map { RimeInputSourceAuthority.isOwnInputSourceID($0) } ?? false) {
+            statusLabel.stringValue = "打字测速仅支持 XSIME 输入法 · 请先切换到 XSIME 再开始"
+            NSSound.beep()
+            return
+        }
         if isArmed { interrupt(reason: .interrupted, message: "已重新开始") }
         resetArticle()
         let context = contextProvider?() ?? currentContext()
@@ -1108,6 +1119,13 @@ final class TypingTestStatTile: NSView {
         valueLabel.textColor = RimeUI.textPrimary
         valueLabel.lineBreakMode = .byTruncatingTail
         valueLabel.setContentCompressionResistancePriority(.init(200), for: .horizontal)
+        // A fixed slot, right-aligned: the number grows leftwards and the unit never slides
+        // when the reading changes width (99.5 → 123) on every live refresh.
+        valueLabel.alignment = .right
+        let slot = valueLabel.widthAnchor.constraint(greaterThanOrEqualToConstant:
+            ceil(NSAttributedString(string: "8888", attributes: [.font: valueLabel.font!]).size().width) + 4)
+        slot.priority = .init(600)
+        slot.isActive = true
         unitLabel.font = .systemFont(ofSize: 10)
         unitLabel.textColor = RimeUI.textMuted
         unitLabel.lineBreakMode = .byTruncatingTail
@@ -1132,6 +1150,9 @@ final class TypingTestStatTile: NSView {
         update(value: "—")
     }
     required init?(coder: NSCoder) { nil }
+
+    /// Window x of the unit label, for the smoke test.
+    var smokeUnitX: CGFloat { layoutSubtreeIfNeeded(); return unitLabel.convert(unitLabel.bounds, to: nil).minX }
 
     func update(value: String, unit: String = "", detail: String = "") {
         valueLabel.stringValue = value

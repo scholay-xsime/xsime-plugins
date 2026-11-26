@@ -21,7 +21,7 @@ struct TypingTestBook: Codable, Equatable, Identifiable {
     /// re-importing the same file replaces an older cut, and results recorded
     /// against the old text stay under their own article version.
     var cut = TypingTestBook.currentCut
-    static let currentCut = 3
+    static let currentCut = 4
     /// First 16 hex characters of the SHA-256 of the imported file.
     var id: String
     var title: String
@@ -102,6 +102,13 @@ enum TypingTestPassageSplitter {
         return wide >= latin && wide > 0 ? .chinese : .english
     }
 
+    /// Curly quotes, dashes, ellipses and the middle dot are Latin-range but behave as full-width
+    /// punctuation next to ideographs; between two of them (English dialogue) a space stays.
+    private static let wideLike: Set<UInt32> = [0x2018, 0x2019, 0x201C, 0x201D, 0x2014, 0x2026, 0x00B7]
+    private static func joinsWithoutSpace(_ a: Unicode.Scalar, _ b: Unicode.Scalar) -> Bool {
+        (isWide(a) && isWide(b)) || (isWide(a) && wideLike.contains(b.value)) || (wideLike.contains(a.value) && isWide(b))
+    }
+
     /// Whitespace runs become one space, invisible and control characters are
     /// removed, and a space between two ideographs (an artifact of pretty-printed
     /// markup) is dropped. A space beside Latin text is typography and stays.
@@ -119,7 +126,7 @@ enum TypingTestPassageSplitter {
             }
             if scalar.value < 0x20 || scalar.value == 0x7F { continue }
             if pendingSpace {
-                if let last = scalars.last, !(isWide(last) && isWide(scalar)) { scalars.append(" ") }
+                if let last = scalars.last, !joinsWithoutSpace(last, scalar) { scalars.append(" ") }
                 pendingSpace = false
             }
             scalars.append(scalar)
@@ -235,30 +242,55 @@ enum TypingTestPassageSplitter {
 
     // MARK: Practice-friendly text
 
-    private static let decorative: Set<UInt32> = Set("※★☆◆◇■□●○◎◈▲△▼▽♦♠♥♣▶◀►◄〓§¶†‡".unicodeScalars.map(\.value))
-    private static let repeatable: Set<Character> = ["，", "。", "！", "？", "；", "：", "、", ",", ".", "!", "?", ";", ":", "-", "_", "=", "*", "~", "～", "·"]
+    private static let decorative: Set<UInt32> = Set("※★☆◆◇■□●○◎◈▲△▼▽♦♠♥♣▶◀►◄〓§¶†‡•‧・∙▪▫◦".unicodeScalars.map(\.value))
+    private static let repeatable: Set<Character> = ["，", "。", "！", "？", "；", "：", "、", ",", "!", "?", ";", ":", "-", "_", "=", "*", "~", "～", "·"]
 
     private static let linkPattern = try! NSRegularExpression(pattern: #"https?://\S+|www\.\S+|\S+@\S+\.\S+"#)
     private static let footnotePattern = try! NSRegularExpression(pattern: #"[\[［【(（]\s*(注\s*)?\d{1,3}\s*[\]］】)）]"#)
     private static let rulePattern = try! NSRegularExpression(pattern: #"[\-_=*~～]{2,}"#)
+    /// Contents-page dot leaders (eight or more dots, possibly spaced) with the page number that follows;
+    /// a six-dot ellipsis is prose and stays.
+    private static let leaderPattern = try! NSRegularExpression(pattern: #"\s*(?:[.．·]\s*){8,}\d{0,4}"#)
+    private static let doubleDotPattern = try! NSRegularExpression(pattern: #"(?<!\.)\.\.(?!\.)"#)
+    /// A point or middle dot standing alone between spaces (or at the start): a bullet or scanning residue.
+    private static let loosePointPattern = try! NSRegularExpression(pattern: #"(?:^|(?<=\s))[.·]+(?=\s|$)"#)
+    /// Spaces before closing marks and after opening ones are never typed.
+    private static let spaceBeforeClosing = try! NSRegularExpression(pattern: #" +(?=[,.;:!?)\]}”’、，。！？；：）】》」』〕])"#)
+    private static let spaceAfterOpening = try! NSRegularExpression(pattern: #"(?<=[(\[{“‘（【《「『〔]) +"#)
+    /// Chinese text: no space between an ideograph or full-width mark and a Latin letter, digit or bracket.
+    private static let spaceAroundCJK = try! NSRegularExpression(
+        pattern: #"(?<=[\u3400-\u9FFF\u3000-\u303F\uFF00-\uFFEF]) +(?=[A-Za-z0-9(\[])|(?<=[A-Za-z0-9%)\]]) +(?=[\u3400-\u9FFF\u3000-\u303F\uFF00-\uFFEF])"#)
     private static func strip(_ expression: NSRegularExpression, from text: String) -> String {
         expression.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: "")
     }
 
+    /// Number of contents-page leaders in a paragraph; a paragraph with several is a catalogue line.
+    static func leaderCount(_ paragraph: String) -> Int {
+        leaderPattern.numberOfMatches(in: paragraph, range: NSRange(paragraph.startIndex..., in: paragraph))
+    }
+
     /// Removes what is awkward to type and carries no reading value: decorative
-    /// symbols, footnote markers, links and addresses, rules made of symbols, and
-    /// runs of repeated punctuation.
+    /// symbols and bullets, footnote markers, links and addresses, contents-page
+    /// leaders, loose points, rules made of symbols, runs of repeated punctuation,
+    /// and spaces that are never typed (beside closing/opening marks, between
+    /// Chinese and Latin text).
     static func practiceText(_ paragraph: String) -> String {
         // The address pattern backtracks badly on long unspaced text; only run it when a hint is present.
         let mayHaveLink = paragraph.contains("@") || paragraph.contains("http") || paragraph.contains("www.")
-        var text = strip(footnotePattern, from: mayHaveLink ? strip(linkPattern, from: paragraph) : paragraph)
+        var text = strip(leaderPattern, from: paragraph)
+        text = strip(footnotePattern, from: mayHaveLink ? strip(linkPattern, from: text) : text)
         text = String(String.UnicodeScalarView(text.unicodeScalars.filter { !decorative.contains($0.value) }))
         var out: [Character] = []
         for character in text {
             if let last = out.last, last == character, repeatable.contains(character) { continue }
             out.append(character)
         }
-        return tidy(strip(rulePattern, from: String(out)))
+        text = doubleDotPattern.stringByReplacingMatches(in: String(out), range: NSRange(location: 0, length: (String(out) as NSString).length),
+                                                         withTemplate: ".")
+        text = tidy(strip(rulePattern, from: strip(loosePointPattern, from: text)))
+        text = strip(spaceAfterOpening, from: strip(spaceBeforeClosing, from: text))
+        if language(of: text) == .chinese { text = strip(spaceAroundCJK, from: text) }
+        return text
     }
 
     /// Share of characters that are neither letters, ideographs nor spaces.
@@ -410,7 +442,7 @@ enum TypingTestEPUBImporter {
             guard archive.contains(path), let document = decode(try archive.read(path)) else { continue }
             let extracted = HTMLText.extract(document)
             let raw = extracted.paragraphs
-            let paragraphs = raw.map(TypingTestPassageSplitter.practiceText).filter(TypingTestPassageSplitter.isReadable)
+            let paragraphs = raw.filter { TypingTestPassageSplitter.leaderCount($0) < 3 }.map(TypingTestPassageSplitter.practiceText).filter(TypingTestPassageSplitter.isReadable)
             let text = paragraphs.joined()
             guard text.count >= minimumChapterCharacters,
                   !isFrontMatter(heading: extracted.heading, first: raw.first, count: text.count),
